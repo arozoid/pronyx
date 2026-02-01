@@ -1,51 +1,17 @@
-// Disable rust std lib
 #![no_std]
-// Disable rust main function
 #![no_main]
-#![feature(lang_items)]
-#![feature(bindings_after_at)]
-#![feature(llvm_asm)]
-// Use `link_args` attribute to customize linking.
-#![feature(link_args)]
 
-#[allow(unused_attributes)]
-// Only static links are used and prevent linking with the shared libraries.
-#[link_args = "-no-pie"]
-#[link_args = "-static"]
-// Disable system startup files or libraries when linking. This means
-// that the linker will not include files like `crt0.o` and some of the
-// system standard libraries.
-// See https://gcc.gnu.org/onlinedocs/gcc/Link-Options.html
-//
-// The `-nostdlib` flag is much like a combination of `-nostartfiles` and
-// `-nodefaultlibs`.
-//
-// Since `_start` is defined in the system startup files, with this option
-// we can use our own `_start` function to override the program entry point.
-#[link_args = "-nostdlib"]
-#[link_args = "-ffreestanding"]
-#[cfg_attr(target_arch = "x86", link_args = "-mregparm=3")]
-#[cfg_attr(target_arch = "x86", link_args = "-Wl,-Ttext=0xa0000000")]
-#[cfg_attr(target_arch = "x86_64", link_args = "-Wl,-Ttext=0x600000000000")]
-#[cfg_attr(target_arch = "arm", link_args = "-Wl,-Ttext=0x10000000")]
-#[cfg_attr(target_arch = "aarch64", link_args = "-Wl,-Ttext=0x2000000000")]
-extern "C" {}
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
 
-// The compiler may emit a call to the `memset()` function even if there is
-// no such call in our code. However, since we use `-nostdlib` or
-// `-nodefaultlibs`, this means we will not link to libc, which provides the
-// implementation of `memset()`.
-//
-// In this case, we will get an `undefined reference to \`memset'` error.
-// Fortunately, the crate `rlibc` provides an unoptimized implementation of
-// `memset()`.
-//
-// See `-nodefaultlibs` at https://gcc.gnu.org/onlinedocs/gcc/Link-Options.html
-extern crate rlibc;
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality() {}
 
 mod script;
 
-use core::{fmt::Write, panic::PanicInfo};
+use core::{fmt::Write};
 
 use crate::script::*;
 
@@ -61,93 +27,75 @@ const MMAP_OFFSET_SHIFT: usize = 0;
 #[cfg(any(target_arch = "arm"))]
 const MMAP_OFFSET_SHIFT: usize = 12;
 
+#[allow(unused)]
+const WRITE: usize = 1;
+const MMAP: usize = 9;
+const PRCTL: usize = 157;
+const EXECVE: usize = 59;
+
+const MPROTECT: usize = 10;
+
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const PROT_EXEC: usize = 0x4;
 const PROT_GROWSDOWN: usize = 0x01000000;
 
+const OPEN: usize = 2;
+const CLOSE: usize = 3;
 const AT_NULL: usize = 0;
+
 const AT_PHDR: usize = 3;
 const AT_PHENT: usize = 4;
 const AT_PHNUM: usize = 5;
-const AT_BASE: usize = 7;
+const AT_BASE: usize = 7;   // address of the interpreter (ld.so)
 const AT_ENTRY: usize = 9;
-const AT_EXECFN: usize = 31;
+const AT_EXECFN: usize = 31; // filename of the executed program
 
 const PR_SET_NAME: usize = 15;
 
 macro_rules! branch {
-    ($stack_pointer:expr, $entry_point:expr) => {
-        #[cfg(target_arch = "x86_64")]
-        llvm_asm!("
-            // Restore initial stack pointer.
-            movq $0, %rsp
-            // Clear state flags.
-            pushq $$0
-            popfq
-            // Clear rtld_fini.
-            movq $$0, %rdx
-            // Start the program.
-            jmpq *%rax
-        "
-        : /* no output */
-        : "irm" ($stack_pointer), "{ax}" ($entry_point)
-        : "memory", "cc", "rsp", "rdx"
-        : "volatile"
+    ($stack_ptr:expr, $entry_pt:expr) => {
+        core::arch::asm!(
+            "mov rsp, {0}",
+            "jmp {1}",
+            in(reg) $stack_ptr,
+            in(reg) $entry_pt,
+            options(noreturn)
         );
-        #[cfg(target_arch = "x86")]
-        llvm_asm!("
-            // Restore initial stack pointer
-            movl $0, %esp
-            // Clear state flags.
-            pushl $$0
-            popfl
-            // Clear rtld_fini.
-            movl $$0, %edx
-            // Start the program.
-            jmpl *%eax
-        "
-        : /* no output */
-        : "irm" ($stack_pointer), "{ax}" ($entry_point)
-        : "memory", "cc", "esp", "edx"
-        : "volatile"
-        );
-        #[cfg(target_arch = "aarch64")]
-        llvm_asm!("
-            // Restore initial stack pointer
-            mov sp, $0
-            // Clear rtld_fini.
-            mov x0, 0
-            // Start the program.
-            br $1
-        "
-        : /* no output */
-        : "r" ($stack_pointer), "r" ($entry_point)
-        : "memory", "x0"
-        : "volatile"
-        );
-        #[cfg(target_arch = "arm")]
-        llvm_asm!("
-            // Restore initial stack pointer
-            mov sp, $0
-            // Clear rtld_fini.
-            mov r0, $$0
-            // Start the program.
-            mov pc, $1
-        "
-        : /* no output */
-        : "r" ($stack_pointer), "r" ($entry_point)
-        : "memory", "r0"
-        : "volatile"
-        );
-
-    }
+    };
 }
 
-/**
- * Interpret the load script pointed to by @cursor.
- */
-#[no_mangle]
+macro_rules! sc {
+    ($nr:expr) => { syscall6($nr, 0, 0, 0, 0, 0, 0) };
+    ($nr:expr, $a1:expr) => { syscall6($nr, $a1 as usize, 0, 0, 0, 0, 0) };
+    ($nr:expr, $a1:expr, $a2:expr) => { syscall6($nr, $a1 as usize, $a2 as usize, 0, 0, 0, 0) };
+    ($nr:expr, $a1:expr, $a2:expr, $a3:expr) => { syscall6($nr, $a1 as usize, $a2 as usize, $a3 as usize, 0, 0, 0) };
+    ($nr:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr) => { syscall6($nr, $a1 as usize, $a2 as usize, $a3 as usize, $a4 as usize, 0, 0) };
+    ($nr:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr) => { syscall6($nr, $a1 as usize, $a2 as usize, $a3 as usize, $a4 as usize, $a5 as usize, 0) };
+    ($nr:expr, $a1:expr, $a2:expr, $a3:expr, $a4:expr, $a5:expr, $a6:expr) => { syscall6($nr, $a1 as usize, $a2 as usize, $a3 as usize, $a4 as usize, $a5 as usize, $a6 as usize) };
+}
+
+unsafe fn syscall6(nr: usize, a1: usize, a2: usize, a3: usize, a4: usize, a5: usize, a6: usize) -> usize {
+    let ret: usize;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inout("rax") nr => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            in("r8") a5,
+            in("r9") a6,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn _start(mut cursor: *const ()) {
     let mut traced = false;
     let mut reset_at_base = true;
@@ -155,26 +103,32 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
     let mut fd: Option<isize> = None;
 
     loop {
+        unsafe {
         // check if cursor is null
         // TODO: Check LoadStatement flag is vaild: Converting memory regions
         // directly to references to enum in rust is dangerous because invalid
         // tags can lead to undefined behaviors.
         let stmt: &LoadStatement = match (cursor as *const LoadStatement).as_ref() {
             Some(stmt) => stmt,
-            None => panic!("Value of cursor is null"),
+            None => core::arch::asm!(
+                        "mov rax, 60", // sys_exit
+                        "mov rdi, 1",  // status 1
+                        "syscall",
+                        options(noreturn)
+                    ),
         };
         match stmt {
             st @ (LoadStatement::OpenNext(open) | LoadStatement::Open(open)) => {
                 if let LoadStatement::OpenNext(_) = st {
                     // close last fd
-                    assert!(sc::syscall!(CLOSE, fd.unwrap()) as isize >= 0);
+                    assert!(sc!(CLOSE, fd.unwrap() as usize, 0, 0) == 0);
                 }
                 // open file
                 #[cfg(any(target_arch = "x86", target_arch = "arm", target_arch = "x86_64"))]
-                let status = sc::syscall!(OPEN, open.string_address, O_RDONLY, 0) as isize;
+                let status = sc!(OPEN, open.string_address, O_RDONLY, 0) as isize;
                 #[cfg(any(target_arch = "aarch64"))]
                 let status =
-                    sc::syscall!(OPENAT, AT_FDCWD, open.string_address, O_RDONLY, 0) as isize;
+                    sc!(OPENAT, AT_FDCWD, open.string_address, O_RDONLY, 0) as isize;
                 assert!(status >= 0);
                 fd = Some(status);
                 reset_at_base = true
@@ -182,17 +136,17 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
             LoadStatement::MmapFile(mmap) => {
                 // call mmap() with fd
                 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-                let status = sc::syscall!(
+                let status = sc!(
                     MMAP,
-                    mmap.addr,
-                    mmap.length,
-                    mmap.prot,
+                    mmap.addr as usize,
+                    mmap.length as usize,
+                    mmap.prot as usize,
                     MAP_PRIVATE | MAP_FIXED,
-                    fd.unwrap(),
-                    mmap.offset >> MMAP_OFFSET_SHIFT
+                    fd.unwrap() as usize, // fd needs to be usize
+                    (mmap.offset >> MMAP_OFFSET_SHIFT) as usize
                 );
                 #[cfg(any(target_arch = "arm", target_arch = "x86"))]
-                let status = sc::syscall!(
+                let status = sc!(
                     MMAP2,
                     mmap.addr,
                     mmap.length,
@@ -217,7 +171,7 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
             }
             LoadStatement::MmapAnonymous(mmap) => {
                 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-                let status = sc::syscall!(
+                let status = sc!(
                     MMAP,
                     mmap.addr,
                     mmap.length,
@@ -227,7 +181,7 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
                     0
                 );
                 #[cfg(any(target_arch = "arm", target_arch = "x86"))]
-                let status = sc::syscall!(
+                let status = sc!(
                     MMAP2,
                     mmap.addr,
                     mmap.length,
@@ -240,7 +194,7 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
                 assert!(status as isize >= 0);
             }
             LoadStatement::MakeStackExec(stack_exec) => {
-                sc::syscall!(
+                sc!(
                     MPROTECT,
                     stack_exec.start,
                     1,
@@ -252,7 +206,7 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
                     traced = true;
                 }
                 // close last fd
-                assert!(sc::syscall!(CLOSE, fd.unwrap()) as isize >= 0);
+                assert!(sc!(CLOSE, fd.unwrap()) as isize >= 0);
 
                 /* Right after execve, the stack content is as follow:
                  *
@@ -311,11 +265,11 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
                     cursor
                 };
                 let name = get_basename(start.at_execfn as _);
-                sc::syscall!(PRCTL, PR_SET_NAME, name as usize, 0);
+                sc!(PRCTL, PR_SET_NAME, name as usize, 0);
 
                 // jump to new entry point
                 if traced {
-                    sc::syscall!(EXECVE, 1, start.stack_pointer, start.entry_point, 2, 3, 4);
+                    sc!(EXECVE, 1, start.stack_pointer, start.entry_point, 2, 3, 4);
                 } else {
                     branch!(start.stack_pointer, start.entry_point);
                 }
@@ -324,9 +278,11 @@ pub unsafe extern "C" fn _start(mut cursor: *const ()) {
         }
         // move cursor to next load statement
         cursor = (cursor as *const u8).offset(stmt.as_bytes().len() as _) as _;
+        }
     }
 }
 
+#[allow(unused)]
 struct Stderr {}
 
 impl Write for Stderr {
@@ -335,7 +291,7 @@ impl Write for Stderr {
         let mut count = 0;
         while count < bs.len() {
             unsafe {
-                let status = sc::syscall!(WRITE, 2, bs.as_ptr().add(count), bs.len() - count);
+                let status = sc!(WRITE, 2, bs.as_ptr().add(count), bs.len() - count);
                 if (status as isize) < 0 {
                     return Err(core::fmt::Error);
                 } else {
@@ -347,23 +303,7 @@ impl Write for Stderr {
     }
 }
 
-#[lang = "eh_personality"]
-fn eh_personality() {}
-#[panic_handler]
-fn panic_handler(panic_info: &PanicInfo<'_>) -> ! {
-    // If an error occurs, use the exit() system call to exit the program.
-    let _ = write!(
-        Stderr {},
-        "An error occurred in loader-shim:\n{}\n",
-        panic_info
-    );
-    unsafe {
-        sc::syscall!(EXIT, 182);
-    }
-    unreachable!()
-}
-
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe fn __aeabi_unwind_cpp_pr0() -> () {
     loop {}
 }

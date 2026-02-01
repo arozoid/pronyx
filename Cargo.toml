@@ -1,10 +1,13 @@
-cargo-features = ["strip"]
-
 [workspace]
 members = [
-  "proot-rs",
+  "pronyx",
   "loader-shim",
 ]
+resolver = "3"
+
+[profile.dev]
+panic = "abort"
 
 [profile.release]
 strip = true
+panic = "abort"

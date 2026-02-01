@@ -1,0 +1,19 @@
+[package]
+name = "pronyx"
+version = "0.1.0"
+authors = ["PRoot Developers <proot_me@googlegroups.com>", "arozoid <arozoidyt@gmail.com>"]
+edition = "2024"
+
+[dependencies]
+loader-shim = { path = "../loader-shim" }
+syscalls = "0.7.0"
+clap = { version = "4.5.56", features = ["derive"] }
+nix = { version = "0.29", features = ["ptrace", "process", "fs", "user", "sched", "signal", "mman"] }
+env_logger = "0.11.8"
+log = "0.4.29"
+byteorder = "1.5"
+lazy_static = "1.5.0"
+libc = "0.2.180"
+
+[dev-dependencies]
+nc = "0.9.7"

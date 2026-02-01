@@ -32,26 +32,26 @@ jobs:
       run: |
         curl -L https://github.com/rust-embedded/cross/releases/download/v0.2.1/cross-v0.2.1-x86_64-unknown-linux-musl.tar.gz | tar -xzf - --to-stdout > ~/.cargo/bin/cross
         chmod +x ~/.cargo/bin/cross
-    - name: Build proot-rs
+    - name: Build pronyx
       shell: bash
       run: |
         USE_CROSS=true CARGO_BUILD_TARGET="${{ matrix.target }}" cargo make build --profile=production
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
-        name: proot-rs-${{ matrix.target }}
-        path: target/${{ matrix.target }}/release/proot-rs
+        name: pronyx-${{ matrix.target }}
+        path: target/${{ matrix.target }}/release/pronyx
     - name: Compress binaries
       # We only publish binaries when we create a tag
       if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
       shell: bash
       run: |
-        tar czvf proot-rs.tar.gz -C target/${{ matrix.target }}/release proot-rs
+        tar czvf pronyx.tar.gz -C target/${{ matrix.target }}/release pronyx
     - name: Upload binaries to release
       if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
       uses: svenstaro/upload-release-action@v2
       with:
         repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: proot-rs.tar.gz
-        asset_name: proot-rs-$tag-${{ matrix.target }}.tar.gz
+        file: pronyx.tar.gz
+        asset_name: pronyx-rs-$tag-${{ matrix.target }}.tar.gz
         tag: ${{ github.ref }}
