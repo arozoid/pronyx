@@ -1,11 +1,14 @@
 Vincent Hage <hagevincent@gmail.com>
-        Original author, maintainer.
+        Original author, maintainer of proot-rs.
 
 Lucas Ramage <ramage.lucas@protonmail.com>
-        Maintainer.
+        Maintainer of proot-rs.
 
 Joshua Nelson <jyn514@gmail.com>
         Implemented shebang parsing, bug reports, and fixes.
 
 imlk <me@imlk.top>
         Refactored error handling, implemented syscall translation, and rewritten loader with rust.
+
+arozoid <arozoidyt@gmail.com>
+        Further refactored error handling, implemented syscall translation updates, and modernized parts of the loader in Rust for pronyx.
